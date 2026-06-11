@@ -1,0 +1,18 @@
+[project]
+name = "sac-tools"
+version = "0.1.0"
+description = "SAC Website Asset Processing Tools"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pillow>=12.2.0",
+    "python-docx>=1.2.0",
+    "pymupdf>=1.27.0",
+]
+
+[project.scripts]
+sac-process = "process_assets:main"
+sac-images = "image_converter:main"
+sac-docx = "docx_parser:main"
+sac-pdf = "pdf_parser:main"
+sac-rename = "file_renamer:main"
