@@ -1,36 +1,97 @@
 #!/usr/bin/env python3
-"""Generate rich assets_map.jsonl from processed directory.
+"""Generate the canonical assets_map.jsonl for the SAC website.
 
-Produces structured metadata per file for website rendering:
-  - path: relative path
-  - club: club/organization
-  - category: subfolder
-  - filename: file name
-  - extension: file extension
-  - type: image/document/text
-  - role: semantic role (OB, Event, Logo, IICM, etc.)
-  - tenure: year/tenure if applicable
-  - title: human-readable title
-  - description: contextual description
-  - tags: list of tags
+This is the SINGLE source of truth for the website's asset catalogue. It
+supersedes any previous markdown or JSONL index in the repo.
+
+Schema (one JSON object per line, file ordering = walk order):
+  id                      int     — sequential 1-indexed identifier
+  path                    str     — path relative to the processed/ root
+  absolute_path           str     — path relative to the main repo root
+  public_url              str     — URL the asset will be served at when the
+                                     site is deployed (base: /SAC_Website/)
+  club                    str     — sanitized directory name of the club
+  club_name               str     — human-readable club name
+  category                str     — subdirectory under the club
+  category_label          str     — human-readable category description
+  filename                str     — basename of the file
+  title                   str     — cleaned human title
+  extension               str     — file extension (lower-case, no dot)
+  file_type               str     — image | markdown | pdf | document | spreadsheet
+  mime_type               str     — best-effort MIME type
+  size_bytes              int     — file size in bytes
+  width                   int?    — pixel width (images only)
+  height                  int?    — pixel height (images only)
+  orientation             str?    — landscape | portrait | square (images only)
+  aspect_ratio            float?  — width / height (images only)
+  role                    str     — semantic role: office-bearer | logo | event
+                                     | iicm-achievement | equipment | portfolio
+                                     | outer-fest | club-document | extracted-image
+                                     | other
+  tenure                  str?    — YY-YY or YYYY-YY tenure marker
+  year                    int?    — primary year (e.g. 2025)
+  person                  str?    — person's name (for OB portraits)
+  ob_role                 str?    — office-bearer role (e.g. "Secretary")
+  is_ob_portrait          bool
+  is_logo                 bool
+  is_event                bool
+  is_iicm                 bool
+  is_extracted_from_doc   bool
+  is_markdown_content     bool
+  description             str     — one-line human description
+  tags                    list    — list of lowercase tags
+  updated_at              str     — ISO timestamp of when the entry was generated
+
+Usage
+-----
+Standalone CLI (run from anywhere; defaults assume the standard submodule
+layout, i.e. the script lives at <submodule>/tools/generate_assets_map.py
+and the processed tree is at <submodule>/processed/):
+
+    python generate_assets_map.py
+    python generate_assets_map.py /path/to/processed
+    python generate_assets_map.py /path/to/processed -o /tmp/map.jsonl
+    python generate_assets_map.py --site-base /my-site/
+
+Importable:
+
+    from generate_assets_map import generate_assets_map
+    generate_assets_map(Path("processed"), Path("processed/assets_map.jsonl"))
 """
 
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
 import json
+import mimetypes
 import os
 import re
+import sys
+from collections import Counter
 from pathlib import Path
 
+from PIL import Image
+
+# ----------------------------------------------------------------------------
+# Constants — paths, club metadata, role dictionaries
+# ----------------------------------------------------------------------------
+TOOLS_DIR = Path(__file__).resolve().parent
+SUBMODULE_ROOT = TOOLS_DIR.parent
+DEFAULT_PROCESSED_DIR = SUBMODULE_ROOT / "processed"
+DEFAULT_OUTPUT = DEFAULT_PROCESSED_DIR / "assets_map.jsonl"
+DEFAULT_SITE_BASE = "/SAC_Website"  # matches Vite base in vite.config.js
 
 CLUB_NAMES = {
     "AARSHI_-_Drama_Club": "AARSHI - Drama Club",
     "Arts_Club_of_IISER_Kolkata": "Arts Club of IISER Kolkata",
-    "Campus_Radio_IISER_KOLKATA": "Campus Radio IISER KOLKATA",
+    "Campus_Radio_IISER_KOLKATA": "Campus Radio IISER KOLKATA (IKCR)",
     "IKQC_-_Quiz_Club_of_IISER_Kolkata": "IKQC - Quiz Club of IISER Kolkata",
     "Literary_Club_of_IISER_Kolkata": "Literary Club of IISER Kolkata",
     "Movie_Club_of_IISER_K": "Movie Club of IISER K",
     "Music_Club_of_IISER_K": "Music Club of IISER K",
     "Nature_Club_Of_IISER_Kolkata": "Nature Club of IISER Kolkata",
-    "Nrutya_-_The_Dance_Club_of_IISER_Kolkata": "Nrutya - The Dance Club of IISER Kolkata",
+    "Nrutya_-_The_Dance_Club_of_IISER_Kolkata": "Nrutya - Dance Club of IISER Kolkata",
     "PIXEL-Photography_Club": "PIXEL - Photography Club",
 }
 
@@ -51,147 +112,388 @@ CLUB_TAGS = {
     "PIXEL-Photography_Club": ["photography", "camera", "visual"],
 }
 
+CATEGORY_LABEL = {
+    "OBs": "Office-bearer portrait",
+    "OB": "Office-bearer portrait",
+    "nOBs": "Office-bearer portrait (new term)",
+    "office-bearers": "Office-bearer portrait",
+    "office_bearers": "Office-bearer portrait",
+    "25-26_OBs": "Office-bearer portrait (tenure 2025-26)",
+    "26-27_OBs": "Office-bearer portrait (tenure 2026-27)",
+    "26-27_Club_OBs": "Office-bearer portrait (tenure 2026-27)",
+    "2026-27_OBs": "Office-bearer portrait (tenure 2026-27)",
+    "New_OB_26-27_Term": "Office-bearer portrait (new term 2026-27)",
+    "OBs_26-27": "Office-bearer portrait (tenure 2026-27)",
+    "Logos": "Club logo / brand asset",
+    "Logo": "Club logo / brand asset",
+    "Campus_Radio_Logo": "Club logo / brand asset",
+    "EVENTS_PICS": "Event photograph",
+    "Event_Photos": "Event photograph",
+    "Event_Pics": "Event photograph",
+    "Event_Photographs": "Event photograph",
+    "Event_Pictures": "Event photograph",
+    "Photos_Of_Movie_Club": "Club photograph (screenings / OBs)",
+    "Campus_Radio_Pictures": "Club photograph (events / OBs)",
+    "IICM_Achievements": "IICM (Inter-IISER Cultural Meet) achievement photo",
+    "IICM_Photographs": "IICM (Inter-IISER Cultural Meet) photograph",
+    "IICM_Photos": "IICM (Inter-IISER Cultural Meet) photograph",
+    "IICM_Pics": "IICM (Inter-IISER Cultural Meet) photograph",
+    "IICM": "IICM (Inter-IISER Cultural Meet) photograph",
+    "Equipments": "Equipment / gear photograph",
+    "Portfolio_Pixel": "Member portfolio image",
+    "Portfolio": "Member portfolio image",
+    "Outer_Fest_Achievement": "Outer-fest achievement / winner photo",
+    "Overall_Document": "Source document (raw)",
+    "Past_OBs": "Past office-bearers data",
+    "Campus_Radio_Information": "Campus radio information document",
+    "Movie_Club_Information": "Movie club information document",
+    "Report_Compiled_Extra": "Compiled report (raw)",
+}
+
+ROLES_KW = {
+    "secretary",
+    "convener",
+    "convenor",
+    "treasurer",
+    "president",
+    "vp",
+    "ceo",
+    "cfo",
+    "coo",
+    "pro",
+    "eo",
+    "eventorganiser",
+    "eventorganizer",
+    "event organiser",
+    "event organizer",
+    "event manager",
+    "events head",
+}
+
+EXT_MIME = {
+    "webp": "image/webp",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "heic": "image/heic",
+    "bmp": "image/bmp",
+    "svg": "image/svg+xml",
+    "avif": "image/avif",
+    "md": "text/markdown",
+    "markdown": "text/markdown",
+    "txt": "text/plain",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc": "application/msword",
+    "pdf": "application/pdf",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "csv": "text/csv",
+    "json": "application/json",
+    "jsonl": "application/x-ndjson",
+    "zip": "application/zip",
+}
+
+ABSOLUTE_PATH_PREFIX = "public/assets/processed"
+
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+def file_type_of(ext: str) -> str:
+    ext = ext.lower().lstrip(".")
+    if ext in {"webp", "jpg", "jpeg", "png", "gif", "heic", "bmp", "svg", "avif"}:
+        return "image"
+    if ext in {"md", "markdown", "txt"}:
+        return "markdown"
+    if ext in {"docx", "doc"}:
+        return "document"
+    if ext == "pdf":
+        return "pdf"
+    if ext in {"xlsx", "xls", "csv"}:
+        return "spreadsheet"
+    return ext or "other"
+
+
+def clean_token(s: str) -> str:
+    s = re.sub(
+        r"\.(webp|jpg|jpeg|png|pdf|md|docx|xlsx|csv|jsonl)$", "", s, flags=re.IGNORECASE
+    )
+    s = s.replace("_", " ").replace("-", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 
 def extract_tenure(text: str) -> str | None:
-    """Extract tenure/year from text."""
     m = re.search(r"(\d{2}-\d{2})", text)
     if m:
         return m.group(1)
-    m = re.search(r"(20\d{2})", text)
+    m = re.search(r"(20\d{2}-\d{2})", text)
     if m:
         return m.group(1)
     return None
 
 
-def determine_role(path_parts: list[str], filename: str) -> str:
-    """Determine semantic role of a file from its path and filename."""
-    path_str = " ".join(path_parts).lower()
-    fname_lower = filename.lower()
-
-    if "logo" in path_str or "logo" in fname_lower:
-        return "logo"
-    if "ob" in path_str or "ob" in fname_lower or "/obs" in path_str:
-        return "office-bearer"
-    if "iicm" in path_str:
-        return "iicm-achievement"
-    if "event" in path_str:
-        return "event"
-    if "workshop" in path_str:
-        return "workshop"
-    if "equipment" in path_str or "cameras" in path_str:
-        return "equipment"
-    if "portfolio" in path_str:
-        return "portfolio"
-    if "ob-details" in fname_lower or "past" in path_str:
-        return "ob-details"
-
-    if filename.startswith("OB-"):
-        return "office-bearer"
-    if filename.startswith("nOB-"):
-        return "office-bearer"
-
-    if re.search(
-        r"(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO|EventOrganiser|EventOrganizer)_?\d{2}-\d{2}",
-        filename,
-        re.IGNORECASE,
-    ):
-        return "office-bearer"
-    if re.search(
-        r"(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO)", filename
-    ):
-        return "office-bearer"
-
-    if filename.startswith("AARSHI-"):
-        return "event"
-    if "OB_" in filename or "OB-" in filename:
-        return "office-bearer"
-
-    return "other"
+def tenure_to_year(tenure: str | None) -> int | None:
+    """Pick the primary year from a tenure marker like '25-26' or '2025-26'."""
+    if not tenure:
+        return None
+    m = re.match(r"(\d{2,4})-", tenure)
+    if not m:
+        return None
+    y = m.group(1)
+    if len(y) == 2:
+        return 2000 + int(y)
+    return int(y)
 
 
-def clean_title(title: str) -> str:
-    """Clean filename into a human-readable title."""
-    title = re.sub(
-        r"\.(webp|jpg|jpeg|png|pdf|md|docx)$", "", title, flags=re.IGNORECASE
-    )
-    title = title.replace("_", " ").replace("-", " ")
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
+def extract_year(text: str) -> int | None:
+    """Pull the most likely year out of a path / filename.
+    Prefer 4-digit years; fall back to a 2-digit year (assumed 20YY).
+    Skips obviously-not-year numeric fragments (e.g. file counters)."""
+    candidates: list[int] = []
+    for m in re.finditer(r"(?<!\d)(20\d{2})(?!\d)", text):
+        y = int(m.group(1))
+        if 2015 <= y <= 2030:
+            candidates.append(y)
+    if not candidates:
+        for m in re.finditer(r"(?<!\d)(\d{2})(?!\d)", text):
+            yy = int(m.group(1))
+            if 20 <= yy <= 30:
+                candidates.append(2000 + yy)
+    if not candidates:
+        return None
+    return max(candidates)
 
 
-def extract_name_and_role(filename: str) -> tuple[str, str | None]:
-    """Extract person name and their role from OB filenames."""
-    name = ""
-    role = None
+def image_dimensions(path: Path) -> tuple[int | None, int | None]:
+    try:
+        with Image.open(path) as im:
+            return im.size
+    except Exception:
+        return (None, None)
 
-    if filename.startswith("OB-") or filename.startswith("nOB-"):
-        is_new = filename.startswith("nOB-")
-        stripped = filename[4:] if is_new else filename[3:]
-        stripped = re.sub(r"\.webp$", "", stripped)
 
-        parts = stripped.split(" - ")
-        if len(parts) >= 2:
-            name = clean_title(parts[0])
-            role = clean_title(parts[-1])
+def split_ob_filename(fname: str) -> tuple[str, str | None, str | None]:
+    base = re.sub(r"\.(webp|jpg|jpeg|png)$", "", fname, flags=re.IGNORECASE)
+    if base.startswith(("OB-", "nOB-")):
+        stripped = base[4:] if base.startswith("nOB-") else base[3:]
+        parts: list[str]
+        for sep in ("_-_", " - "):
+            if sep in stripped:
+                parts = stripped.split(sep)
+                break
         else:
-            name = clean_title(stripped)
-        return name, role
+            parts = [stripped]
+        marker = "new" if base.startswith("nOB-") else "current"
+        if len(parts) >= 2:
+            return clean_token(parts[0]), clean_token(parts[-1]), marker
+        return clean_token(stripped), None, marker
 
     m = re.search(
-        r"^([A-Za-z][A-Za-z .]+?)(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO|EventOrganiser|EventOrganizer|EventOrganiser)_",
-        filename,
+        r"^([A-Za-z][\w\-\. ]*?)[_\-]?"
+        r"(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO|EventOrganiser|EventOrganizer|Event Organiser|Event Organizer)"
+        r"(?:[_\-](\d{2,4}-\d{2}))?$",
+        base,
+        re.IGNORECASE,
     )
     if m:
-        name = clean_title(m.group(1))
-        role = clean_title(m.group(2))
-        return name, role
+        return clean_token(m.group(1)), clean_token(m.group(2)), m.group(3)
 
-    m = re.search(r"OB-([A-Za-z]+)_([A-Za-z]+)", filename)
-    if m:
-        name = f"{m.group(1)} {m.group(2)}"
-        role_match = re.search(r"_([A-Z][a-z]+)\.webp$", filename)
-        if role_match:
-            role = role_match.group(1)
-        return name, role
+    tokens = base.split("_")
+    if tokens and tokens[-1].lower() in ROLES_KW:
+        role = clean_token(tokens[-1])
+        name = clean_token(" ".join(tokens[:-1]))
+        return name, role, None
 
-    base = re.sub(r"\.webp$", "", filename)
-    base = re.sub(r"_\d{2}-\d{2}$", "", base)
-    name = clean_title(base)
-    return name, role
+    return clean_token(base), None, None
 
 
-def build_description(path_parts: list[str], filename: str, role: str) -> str:
-    """Build a contextual description for a file."""
-    if role == "office-bearer":
-        name, ob_role = extract_name_and_role(filename)
-        tenure = extract_tenure(" ".join(path_parts))
-        if ob_role and tenure:
-            return f"{name} - {ob_role} ({tenure})"
-        elif ob_role:
-            return f"{name} - {ob_role}"
+def first_markdown_heading(path: Path) -> tuple[str | None, str | None]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None, None
+    title = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            title = s[2:].strip()
+            break
+    if not title:
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("## "):
+                title = s[3:].strip()
+                break
+
+    def is_header(s: str) -> bool:
+        if not s:
+            return True
+        if s.endswith(":"):
+            return True
+        letters = [c for c in s if c.isalpha()]
+        return bool(letters) and all(c.isupper() for c in letters)
+
+    para: str | None = None
+    buf: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            if buf and not is_header(" ".join(buf)):
+                para = " ".join(buf).strip()
+                break
+            buf = []
+            continue
+        if s.startswith(("#", "!", "[", "|", "```", "-", "*", ">")):
+            continue
+        buf.append(s)
+    if para is None and buf and not is_header(" ".join(buf)):
+        para = " ".join(buf).strip()
+    if para and len(para) > 280:
+        para = para[:277].rstrip() + "..."
+    return title, para
+
+
+# ----------------------------------------------------------------------------
+# Classification & description
+# ----------------------------------------------------------------------------
+def classify_and_describe(
+    rel_parts: list[str],
+    fname: str,
+    ftype: str,
+    abs_path: Path,
+) -> dict:
+    category = rel_parts[1] if len(rel_parts) > 2 else "(root)"
+    full = f"{category}/{fname}"
+    tenure = extract_tenure(full)
+    year = tenure_to_year(tenure)
+    if year is None:
+        year = extract_year(full)
+
+    flags = {
+        "is_ob_portrait": False,
+        "is_logo": False,
+        "is_event": False,
+        "is_iicm": False,
+        "is_extracted_from_doc": False,
+        "is_markdown_content": False,
+    }
+    role = "other"
+    person: str | None = None
+    ob_role: str | None = None
+    title = clean_token(fname)
+    description = ""
+
+    cat_lower = category.lower()
+    fname_lower = fname.lower()
+
+    if ftype == "markdown":
+        flags["is_markdown_content"] = True
+        role = "club-document"
+        md_title, _para = first_markdown_heading(abs_path)
+        if md_title:
+            title = md_title
+            description = (
+                f'Club information document (parsed from DOCX/PDF) — "{md_title}".'
+            )
         else:
-            return name
-    elif role == "event":
-        return clean_title(filename)
-    elif role == "iicm-achievement":
-        year = extract_tenure(" ".join(path_parts))
-        if year:
-            return f"IICM {year} - {clean_title(filename)}"
-        return f"IICM Achievement - {clean_title(filename)}"
-    elif role == "logo":
-        return f"Logo - {clean_title(filename)}"
-    elif role == "equipment":
-        return f"Equipment - {clean_title(filename)}"
-    elif role == "portfolio":
-        return f"Portfolio - {clean_title(filename)}"
+            description = "Club information document (parsed from DOCX/PDF)."
+    elif ftype in {"document", "pdf", "spreadsheet"}:
+        role = "source-document"
+        description = f"Source document ({ftype}) — {clean_token(fname)}."
     else:
-        return clean_title(filename)
+        if cat_lower.endswith("_images") or "_images" in cat_lower:
+            flags["is_extracted_from_doc"] = True
+            role = "extracted-image"
+            description = (
+                "Image extracted from a source document (DOCX/PDF), converted to WebP."
+            )
+        else:
+            is_ob_category = (
+                "OBs" in category
+                or "office" in cat_lower
+                or cat_lower.endswith("_obs")
+                or re.search(r"\d{2}-\d{2}_obs?$", category, re.IGNORECASE) is not None
+                or "_ob_" in cat_lower
+                or cat_lower.endswith("_ob_term")
+            )
+            is_ob_filename = (
+                fname.startswith(("OB-", "nOB-"))
+                or re.search(
+                    r"(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO)_?\d{2,4}-\d{2}",
+                    fname,
+                    re.IGNORECASE,
+                )
+                is not None
+            )
+            if is_ob_category or is_ob_filename:
+                flags["is_ob_portrait"] = True
+                role = "office-bearer"
+                person, ob_role, marker = split_ob_filename(fname)
+                bits = []
+                if person:
+                    bits.append(person)
+                if ob_role:
+                    bits.append(ob_role)
+                suffix = ", ".join(bits) if bits else clean_token(fname)
+                tenure_str = f" ({tenure})" if tenure else ""
+                new_str = " — new term" if marker == "new" else ""
+                description = (
+                    f"Portrait of office-bearer {suffix}{tenure_str}{new_str}."
+                )
+            elif "logo" in cat_lower or "logo" in fname_lower:
+                flags["is_logo"] = True
+                role = "logo"
+                description = f"Club logo / brand asset — {clean_token(fname)}."
+            elif "iicm" in cat_lower or "iicm" in fname_lower:
+                flags["is_iicm"] = True
+                role = "iicm-achievement"
+                m = re.search(
+                    r"IICM[\s_]*(\d{2,4})", fname + " " + category, re.IGNORECASE
+                )
+                yyyy = m.group(1) if m else None
+                if yyyy and len(yyyy) == 2:
+                    yyyy = "20" + yyyy
+                if yyyy:
+                    description = f"IICM {yyyy} achievement / competition photograph — {clean_token(fname)}."
+                else:
+                    description = f"IICM (Inter-IISER Cultural Meet) photograph — {clean_token(fname)}."
+            elif "event" in cat_lower:
+                flags["is_event"] = True
+                role = "event"
+                description = f"Event photograph — {clean_token(fname)}."
+            elif "equipment" in cat_lower or "cameras" in cat_lower:
+                role = "equipment"
+                description = f"Equipment / gear photograph — {clean_token(fname)}."
+            elif "portfolio" in cat_lower:
+                role = "portfolio"
+                description = f"Member portfolio photograph — {clean_token(fname)}."
+            elif "outer" in cat_lower:
+                role = "outer-fest"
+                description = f"Outer-fest achievement / winner photograph — {clean_token(fname)}."
+            else:
+                description = f"Club photograph — {clean_token(fname)}."
+
+    if ftype == "image" and flags["is_ob_portrait"] and person:
+        title = person
+
+    return {
+        **flags,
+        "role": role,
+        "tenure": tenure,
+        "year": year,
+        "person": person,
+        "ob_role": ob_role,
+        "category_label": CATEGORY_LABEL.get(category, category.replace("_", " ")),
+        "title": title,
+        "description": description,
+    }
 
 
-def get_tags(club: str, path_parts: list[str], role: str) -> list[str]:
-    """Build a list of tags for a file."""
-    tags = list(CLUB_TAGS.get(club, []))
-
+def build_tags(club: str, info: dict) -> list[str]:
+    tags: list[str] = list(CLUB_TAGS.get(club, []))
+    role = info["role"]
     if role == "office-bearer":
         tags.append("ob")
     elif role == "iicm-achievement":
@@ -200,103 +502,187 @@ def get_tags(club: str, path_parts: list[str], role: str) -> list[str]:
         tags.append("event")
     elif role == "logo":
         tags.append("logo")
-    elif role == "workshop":
-        tags.append("workshop")
     elif role == "equipment":
         tags.append("equipment")
     elif role == "portfolio":
         tags.append("portfolio")
-
-    tenure = extract_tenure(" ".join(path_parts))
-    if tenure:
-        tags.append(f"tenure-{tenure}")
-
+    elif role == "outer-fest":
+        tags.append("outer-fest")
+    elif role == "club-document":
+        tags.append("content")
+    elif role == "extracted-image":
+        tags.append("extracted")
+    if info.get("tenure"):
+        tags.append(f"tenure-{info['tenure']}")
+    if info.get("year"):
+        tags.append(f"year-{info['year']}")
     return tags
 
 
-def generate_map(processed_dir: Path, output_path: Path) -> None:
-    """Generate the assets_map.jsonl file."""
-    entries = []
+# ----------------------------------------------------------------------------
+# Main entry — used by both the CLI and by process_assets.py
+# ----------------------------------------------------------------------------
+def generate_assets_map(
+    source_dir: Path,
+    output_path: Path | None = None,
+    site_base: str = DEFAULT_SITE_BASE,
+) -> Path:
+    """Walk `source_dir` and write the canonical assets_map.jsonl to
+    `output_path` (defaulting to `<source_dir>/assets_map.jsonl`).
 
-    for root, _, files in os.walk(processed_dir):
-        for fname in sorted(files):
+    Returns the absolute path of the written file.
+    """
+    source_dir = Path(source_dir).resolve()
+    if output_path is None:
+        output_path = source_dir / "assets_map.jsonl"
+    output_path = Path(output_path).resolve()
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
+    now_iso = _dt.datetime.now().isoformat(timespec="seconds")
+    entries: list[dict] = []
+    eid = 0
+
+    for root, _, fnames in os.walk(source_dir):
+        for fname in sorted(fnames):
             if fname == "assets_map.jsonl":
                 continue
             fpath = Path(root) / fname
-            rel = fpath.relative_to(processed_dir)
-
+            rel = fpath.relative_to(source_dir)
             parts = list(rel.parts)
-            club = parts[0] if len(parts) > 1 else "root"
-            category = parts[1] if len(parts) > 2 else "general"
-
+            if len(parts) < 2:
+                continue
+            eid += 1
+            club = parts[0]
             ext = fpath.suffix.lower()
-            if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp"):
-                ftype = "image"
-            elif ext in (".docx", ".doc"):
-                ftype = "document"
-            elif ext == ".pdf":
-                ftype = "pdf"
-            elif ext in (".xlsx", ".xls", ".csv"):
-                ftype = "spreadsheet"
-            elif ext in (".md", ".txt"):
-                ftype = "text"
-            else:
-                ftype = "other"
+            ext_clean = ext.lstrip(".")
+            ftype = file_type_of(ext)
+            mime = EXT_MIME.get(ext_clean) or (
+                mimetypes.guess_type(fname)[0] or "application/octet-stream"
+            )
+            size = fpath.stat().st_size
+            width, height = (None, None)
+            if ftype == "image":
+                width, height = image_dimensions(fpath)
 
-            role = determine_role(parts, fname)
-            description = build_description(parts, fname, role)
-            tags = get_tags(club, parts, role)
-            tenure = extract_tenure(" ".join(parts))
-            if role == "office-bearer":
-                name, _ = extract_name_and_role(fname)
-                title = name
-            elif role == "logo":
-                title = description.replace("Logo - ", "")
-            else:
-                title = clean_title(fname)
+            info = classify_and_describe(parts, fname, ftype, fpath)
+            tags = build_tags(club, info)
+
+            orientation = None
+            aspect = None
+            if width and height:
+                if width == height:
+                    orientation = "square"
+                elif width > height:
+                    orientation = "landscape"
+                else:
+                    orientation = "portrait"
+                aspect = round(width / height, 3)
 
             entry = {
+                "id": eid,
                 "path": str(rel),
+                "absolute_path": f"{ABSOLUTE_PATH_PREFIX}/{rel}",
+                "public_url": f"{site_base}/{ABSOLUTE_PATH_PREFIX}/{rel}",
                 "club": club,
                 "club_name": CLUB_NAMES.get(club, club),
-                "category": category,
+                "category": parts[1] if len(parts) > 2 else "(root)",
+                "category_label": info["category_label"],
                 "filename": fname,
-                "title": title,
-                "extension": ext.lstrip("."),
-                "type": ftype,
-                "role": role,
-                "tenure": tenure,
-                "description": description,
+                "title": info["title"],
+                "extension": ext_clean,
+                "file_type": ftype,
+                "mime_type": mime,
+                "size_bytes": size,
+                "width": width,
+                "height": height,
+                "orientation": orientation,
+                "aspect_ratio": aspect,
+                "role": info["role"],
+                "tenure": info["tenure"],
+                "year": info["year"],
+                "person": info["person"],
+                "ob_role": info["ob_role"],
+                "is_ob_portrait": info["is_ob_portrait"],
+                "is_logo": info["is_logo"],
+                "is_event": info["is_event"],
+                "is_iicm": info["is_iicm"],
+                "is_extracted_from_doc": info["is_extracted_from_doc"],
+                "is_markdown_content": info["is_markdown_content"],
+                "description": info["description"],
                 "tags": tags,
+                "updated_at": now_iso,
             }
             entries.append(entry)
 
-    with open(output_path, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + "\n")
+    entries.sort(key=lambda r: (r["club"], r["category"], r["filename"]))
+    for i, e in enumerate(entries, start=1):
+        e["id"] = i
 
-    print(f"Generated {len(entries)} entries in {output_path}")
+    by_type = Counter(e["file_type"] for e in entries)
+    by_role = Counter(e["role"] for e in entries)
+    by_club = Counter(e["club"] for e in entries)
+    total_size = sum(e["size_bytes"] for e in entries)
+    print(
+        f"[assets_map] {len(entries)} entries · {total_size / 1024 / 1024:.1f} MB",
+        file=sys.stderr,
+    )
+    print(f"[assets_map] by file_type: {dict(by_type)}", file=sys.stderr)
+    print(f"[assets_map] by role: {dict(by_role)}", file=sys.stderr)
+    print(f"[assets_map] by club:", file=sys.stderr)
+    for club, n in sorted(by_club.items(), key=lambda x: -x[1]):
+        print(f"             {n:4d}  {club}", file=sys.stderr)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    print(f"[assets_map] wrote {output_path}", file=sys.stderr)
+    return output_path
 
 
-def main():
-    import argparse
+# ----------------------------------------------------------------------------
+# CLI
+# ----------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate the canonical assets_map.jsonl for the SAC website. "
+            "Defaults assume this script lives at <submodule>/tools/ and the "
+            "processed tree is at <submodule>/processed/."
+        ),
+    )
+    parser.add_argument(
+        "source",
+        nargs="?",
+        default=None,
+        help=f"Source directory to walk (default: {DEFAULT_PROCESSED_DIR})",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=None,
+        help="Output JSONL path (default: <source>/assets_map.jsonl)",
+    )
+    parser.add_argument(
+        "--site-base",
+        default=DEFAULT_SITE_BASE,
+        help=(
+            "URL prefix the deployed site is served under, used for the "
+            f"public_url field (default: {DEFAULT_SITE_BASE})"
+        ),
+    )
+    args = parser.parse_args(argv)
 
-    parser = argparse.ArgumentParser(description="Generate rich assets_map.jsonl")
-    parser.add_argument("source", help="Processed assets directory")
-    parser.add_argument("-o", "--output", default=None, help="Output path")
-    args = parser.parse_args()
-
-    src = Path(args.source).resolve()
-    if not src.exists():
-        print(
-            f"Source not found: {src}",
-            file=sys.stderr if "sys" in dir() else __import__("sys").stderr,
-        )
-        exit(1)
-
-    out = Path(args.output).resolve() if args.output else src / "assets_map.jsonl"
-    generate_map(src, out)
+    source = Path(args.source).resolve() if args.source else DEFAULT_PROCESSED_DIR
+    output = Path(args.output).resolve() if args.output else None
+    try:
+        generate_assets_map(source, output, site_base=args.site_base)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

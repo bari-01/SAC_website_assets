@@ -10,7 +10,6 @@ Steps:
   5. Generate final assets_map.jsonl
 """
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -22,52 +21,7 @@ from image_converter import process_directory as convert_images
 from docx_parser import process_directory as parse_docx
 from pdf_parser import process_directory as parse_pdf
 from file_renamer import rename_tree
-
-
-def generate_assets_map(processed_dir: Path) -> Path:
-    """Generate assets_map.jsonl from processed directory."""
-    entries = []
-
-    for root, _, files in os.walk(processed_dir):
-        for fname in sorted(files):
-            fpath = Path(root) / fname
-            rel = fpath.relative_to(processed_dir)
-
-            parts = list(rel.parts)
-            club = parts[0] if len(parts) > 1 else "root"
-            category = parts[1] if len(parts) > 2 else "general"
-
-            ext = fpath.suffix.lower()
-            if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".bmp"):
-                ftype = "image"
-            elif ext in (".docx", ".doc"):
-                ftype = "document"
-            elif ext == ".pdf":
-                ftype = "pdf"
-            elif ext in (".xlsx", ".xls", ".csv"):
-                ftype = "spreadsheet"
-            elif ext in (".md", ".txt"):
-                ftype = "text"
-            else:
-                ftype = "other"
-
-            entries.append(
-                {
-                    "path": str(rel),
-                    "club": club,
-                    "category": category,
-                    "filename": fname,
-                    "extension": ext.lstrip("."),
-                    "type": ftype,
-                }
-            )
-
-    map_path = processed_dir / "assets_map.jsonl"
-    with open(map_path, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + "\n")
-
-    return map_path
+from generate_assets_map import generate_assets_map
 
 
 def main():
