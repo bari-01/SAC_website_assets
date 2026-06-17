@@ -93,6 +93,9 @@ CLUB_NAMES = {
     "Nature_Club_Of_IISER_Kolkata": "Nature Club of IISER Kolkata",
     "Nrutya_-_The_Dance_Club_of_IISER_Kolkata": "Nrutya - Dance Club of IISER Kolkata",
     "PIXEL-Photography_Club": "PIXEL - Photography Club",
+    # New SAC committees (added 2026-06)
+    "SAC_Academics": "SAC Academics",
+    "SAC_Hostel": "SAC Hostel Committee",
 }
 
 CLUB_TAGS = {
@@ -110,6 +113,9 @@ CLUB_TAGS = {
         "choreography",
     ],
     "PIXEL-Photography_Club": ["photography", "camera", "visual"],
+    # New SAC committees (added 2026-06)
+    "SAC_Academics": ["academics", "academic-committee"],
+    "SAC_Hostel": ["hostel", "wing-representative", "sub-committee", "residential"],
 }
 
 CATEGORY_LABEL = {
@@ -148,6 +154,29 @@ CATEGORY_LABEL = {
     "Campus_Radio_Information": "Campus radio information document",
     "Movie_Club_Information": "Movie club information document",
     "Report_Compiled_Extra": "Compiled report (raw)",
+    # SAC Academics (added 2026-06)
+    "General_Secretaries": "General Secretaries (academics portfolio)",
+    "Singularity_The_Astronomy_club": "Singularity - The Astronomy Club",
+    "Club_details": "Club details document",
+    "Office_Bearers": "Office-bearers",
+    "Events_and_activities": "Events and activities",
+    "Members": "Club members",
+    "Photos_and_media": "Photos and media",
+    "Slashdot_programming_and_designing_through_code": "Slashdot - programming and designing through code",
+    # SAC Hostel (added 2026-06)
+    "Genral_secretaries": "General Secretaries (hostel portfolio)",
+    "SUB-Committee": "Hostel sub-committee",
+    "Communication_and_Grievances": "Sub-committee: Communication and Grievances",
+    "Health_and_Hygiene": "Sub-committee: Health and Hygiene",
+    "Purchase_and_Handling": "Sub-committee: Purchase and Handling",
+    "Repair_and_Maintenance": "Sub-committee: Repair and Maintenance",
+    "Safety_and_Security": "Sub-committee: Safety and Security",
+    "WRs": "Wing Representatives (by hostel block)",
+    "ICVS": "Wing Representatives - ICVS hostel",
+    "NH_boys": "Wing Representatives - NH boys hostel",
+    "NH_girls": "Wing Representatives - NH girls hostel",
+    "NSCB_boys": "Wing Representatives - NSCB boys hostel",
+    "NSCB_girls": "Wing Representatives - NSCB girls hostel",
 }
 
 ROLES_KW = {
@@ -191,6 +220,8 @@ EXT_MIME = {
     "csv": "text/csv",
     "json": "application/json",
     "jsonl": "application/x-ndjson",
+    "html": "text/html",
+    "htm": "text/html",
     "zip": "application/zip",
 }
 
@@ -212,6 +243,8 @@ def file_type_of(ext: str) -> str:
         return "pdf"
     if ext in {"xlsx", "xls", "csv"}:
         return "spreadsheet"
+    if ext in {"html", "htm"}:
+        return "html"
     return ext or "other"
 
 
@@ -364,8 +397,16 @@ def classify_and_describe(
     ftype: str,
     abs_path: Path,
 ) -> dict:
-    category = rel_parts[1] if len(rel_parts) > 2 else "(root)"
-    full = f"{category}/{fname}"
+    # Use the LAST directory segment as the category. This gives the most
+    # specific location in both the flat club layout (e.g.
+    # AARSHI/25-26_OBs/file.webp -> "25-26_OBs") and the deeper Hostel layout
+    # (e.g. SAC_Hostel/WRs/ICVS/D_block_1st_floor/file.webp -> "D_block_1st_floor").
+    category = rel_parts[-2] if len(rel_parts) > 2 else "(root)"
+    full = "/".join(rel_parts[:-1]) + "/" + fname if len(rel_parts) > 1 else fname
+    # When the path is deeper, also surface the parent grouping (hostel or
+    # sub-committee) for richer descriptions / tenure / year extraction.
+    parent_full = " ".join(rel_parts[:-1]) if len(rel_parts) > 1 else ""
+    full = (parent_full + " " + fname).strip()
     tenure = extract_tenure(full)
     year = tenure_to_year(tenure)
     if year is None:
@@ -586,7 +627,7 @@ def generate_assets_map(
                 "public_url": f"{site_base}/{ABSOLUTE_PATH_PREFIX}/{rel}",
                 "club": club,
                 "club_name": CLUB_NAMES.get(club, club),
-                "category": parts[1] if len(parts) > 2 else "(root)",
+                "category": parts[-2] if len(parts) > 2 else "(root)",
                 "category_label": info["category_label"],
                 "filename": fname,
                 "title": info["title"],
