@@ -93,6 +93,9 @@ CLUB_NAMES = {
     "Nature_Club_Of_IISER_Kolkata": "Nature Club of IISER Kolkata",
     "Nrutya_-_The_Dance_Club_of_IISER_Kolkata": "Nrutya - Dance Club of IISER Kolkata",
     "PIXEL-Photography_Club": "PIXEL - Photography Club",
+    # New SAC committees (added 2026-06)
+    "SAC_Academics": "SAC Academics",
+    "SAC_Hostel": "SAC Hostel Committee",
 }
 
 CLUB_TAGS = {
@@ -110,6 +113,9 @@ CLUB_TAGS = {
         "choreography",
     ],
     "PIXEL-Photography_Club": ["photography", "camera", "visual"],
+    # New SAC committees (added 2026-06)
+    "SAC_Academics": ["academics", "academic-committee"],
+    "SAC_Hostel": ["hostel", "wing-representative", "sub-committee", "residential"],
 }
 
 CATEGORY_LABEL = {
@@ -148,6 +154,29 @@ CATEGORY_LABEL = {
     "Campus_Radio_Information": "Campus radio information document",
     "Movie_Club_Information": "Movie club information document",
     "Report_Compiled_Extra": "Compiled report (raw)",
+    # SAC Academics (added 2026-06)
+    "General_Secretaries": "General Secretaries (academics portfolio)",
+    "Singularity_The_Astronomy_club": "Singularity - The Astronomy Club",
+    "Club_details": "Club details document",
+    "Office_Bearers": "Office-bearers",
+    "Events_and_activities": "Events and activities",
+    "Members": "Club members",
+    "Photos_and_media": "Photos and media",
+    "Slashdot_programming_and_designing_through_code": "Slashdot - programming and designing through code",
+    # SAC Hostel (added 2026-06)
+    "Genral_secretaries": "General Secretaries (hostel portfolio)",
+    "SUB-Committee": "Hostel sub-committee",
+    "Communication_and_Grievances": "Sub-committee: Communication and Grievances",
+    "Health_and_Hygiene": "Sub-committee: Health and Hygiene",
+    "Purchase_and_Handling": "Sub-committee: Purchase and Handling",
+    "Repair_and_Maintenance": "Sub-committee: Repair and Maintenance",
+    "Safety_and_Security": "Sub-committee: Safety and Security",
+    "WRs": "Wing Representatives (by hostel block)",
+    "ICVS": "Wing Representatives - ICVS hostel",
+    "NH_boys": "Wing Representatives - NH boys hostel",
+    "NH_girls": "Wing Representatives - NH girls hostel",
+    "NSCB_boys": "Wing Representatives - NSCB boys hostel",
+    "NSCB_girls": "Wing Representatives - NSCB girls hostel",
 }
 
 ROLES_KW = {
@@ -168,6 +197,36 @@ ROLES_KW = {
     "event organizer",
     "event manager",
     "events head",
+    # Expanded for the SAC dataset (added 2026-06)
+    "event coordinator",
+    "social media manager",
+    "social media head",
+    "socialmedia manager",
+    "socialmedia head",
+    "social media",
+    "media manager",
+    "media head",
+    "publicity",
+    "publicity head",
+    "public relations",
+    "pr head",
+    "marketing",
+    "marketing head",
+    "tech head",
+    "technical head",
+    "design head",
+    "creative head",
+    "content head",
+    "editorial",
+    "editor",
+    "wing representative",
+    "wr",
+    "sub committee",
+    "sub-committee",
+    "general secretary",
+    "joint secretary",
+    "deputy secretary",
+    "coordinator",
 }
 
 EXT_MIME = {
@@ -191,6 +250,8 @@ EXT_MIME = {
     "csv": "text/csv",
     "json": "application/json",
     "jsonl": "application/x-ndjson",
+    "html": "text/html",
+    "htm": "text/html",
     "zip": "application/zip",
 }
 
@@ -212,6 +273,8 @@ def file_type_of(ext: str) -> str:
         return "pdf"
     if ext in {"xlsx", "xls", "csv"}:
         return "spreadsheet"
+    if ext in {"html", "htm"}:
+        return "html"
     return ext or "other"
 
 
@@ -276,6 +339,12 @@ def image_dimensions(path: Path) -> tuple[int | None, int | None]:
 
 def split_ob_filename(fname: str) -> tuple[str, str | None, str | None]:
     base = re.sub(r"\.(webp|jpg|jpeg|png)$", "", fname, flags=re.IGNORECASE)
+    # Strip stray "jpg" suffix leaking from original filenames (e.g. "2026-27jpg")
+    base = re.sub(r"(?<=\d)jpg$", "", base, flags=re.IGNORECASE)
+    # Strip trailing tenure markers like "_2025-26" or "_26-27" before role matching.
+    # Also handles trailing "_" or "-" separators around the tenure.
+    base = re.sub(r"[_\-]*\d{2,4}-\d{2}[_\-]*$", "", base)
+    # Drop leading "OB-" or "nOB-" markers
     if base.startswith(("OB-", "nOB-")):
         stripped = base[4:] if base.startswith("nOB-") else base[3:]
         parts: list[str]
@@ -290,6 +359,28 @@ def split_ob_filename(fname: str) -> tuple[str, str | None, str | None]:
             return clean_token(parts[0]), clean_token(parts[-1]), marker
         return clean_token(stripped), None, marker
 
+    # Try multi-word role match from a known list, looking at the tail of the base.
+    # Roles can be 1-3 words joined by underscores (e.g. "Event_Manager",
+    # "Social_Media_Manager"). Try longest first.
+    # Filter out empty tokens (caused by trailing underscores) and "-" fragments.
+    raw_tokens = base.split("_")
+    tokens = [t for t in raw_tokens if t and t != "-"]
+    # Build a candidate list of role suffixes (1..3 tokens) and check against ROLES_KW
+    for n_role_words in range(min(3, len(tokens)), 0, -1):
+        role_tokens = tokens[-n_role_words:]
+        role_str = " ".join(role_tokens).lower()
+        if role_str in ROLES_KW:
+            role = clean_token(" ".join(role_tokens))
+            name = clean_token(" ".join(tokens[:-n_role_words]))
+            return name, role, None
+
+    # Single-word role embedded in filename (e.g. "Sukanya_Chowdhury_Event_Coordinator_2025-26")
+    if tokens and tokens[-1].lower() in ROLES_KW:
+        role = clean_token(tokens[-1])
+        name = clean_token(" ".join(tokens[:-1]))
+        return name, role, None
+
+    # CEO/CFO/COO/PRO/EO/VP/President/Convener/etc. at end of token (with tenure suffix)
     m = re.search(
         r"^([A-Za-z][\w\-\. ]*?)[_\-]?"
         r"(CEO|CFO|COO|PRO|Secretary|Convener|Treasurer|President|VP|EO|EventOrganiser|EventOrganizer|Event Organiser|Event Organizer)"
@@ -299,12 +390,6 @@ def split_ob_filename(fname: str) -> tuple[str, str | None, str | None]:
     )
     if m:
         return clean_token(m.group(1)), clean_token(m.group(2)), m.group(3)
-
-    tokens = base.split("_")
-    if tokens and tokens[-1].lower() in ROLES_KW:
-        role = clean_token(tokens[-1])
-        name = clean_token(" ".join(tokens[:-1]))
-        return name, role, None
 
     return clean_token(base), None, None
 
@@ -364,12 +449,29 @@ def classify_and_describe(
     ftype: str,
     abs_path: Path,
 ) -> dict:
-    category = rel_parts[1] if len(rel_parts) > 2 else "(root)"
-    full = f"{category}/{fname}"
-    tenure = extract_tenure(full)
+    # Use the LAST directory segment as the category. This gives the most
+    # specific location in both the flat club layout (e.g.
+    # AARSHI/25-26_OBs/file.webp -> "25-26_OBs") and the deeper Hostel layout
+    # (e.g. SAC_Hostel/WRs/ICVS/D_block_1st_floor/file.webp -> "D_block_1st_floor").
+    category = rel_parts[-2] if len(rel_parts) > 2 else "(root)"
+    full = "/".join(rel_parts[:-1]) + "/" + fname if len(rel_parts) > 1 else fname
+    # When the path is deeper, also surface the parent grouping (hostel or
+    # sub-committee) for richer descriptions / tenure / year extraction.
+    parent_full = " ".join(rel_parts[:-1]) if len(rel_parts) > 1 else ""
+    full = (parent_full + " " + fname).strip()
+
+    # Avoid false tenure/year matches from equipment filenames like
+    # "Nikon_200-500mm" or "16-50mm_lens". Only extract from category
+    # (parent directory) for equipment.
+    cat_lower = category.lower()
+    fname_lower = fname.lower()
+    is_equipment = "equipment" in cat_lower or "cameras" in cat_lower
+    tenure_source = parent_full if is_equipment else full
+    year_source = parent_full if is_equipment else full
+    tenure = extract_tenure(tenure_source)
     year = tenure_to_year(tenure)
     if year is None:
-        year = extract_year(full)
+        year = extract_year(year_source)
 
     flags = {
         "is_ob_portrait": False,
@@ -385,10 +487,21 @@ def classify_and_describe(
     title = clean_token(fname)
     description = ""
 
-    cat_lower = category.lower()
-    fname_lower = fname.lower()
+    # Detect OB-related category up front so both markdown bio documents
+    # and standalone portrait images can be classified consistently.
+    is_ob_category = (
+        "OBs" in category
+        or "office" in cat_lower
+        or "office_bearers" in cat_lower
+        or "office-bearers" in cat_lower
+        or cat_lower.endswith("_obs")
+        or re.search(r"\d{2}-\d{2}_obs?$", category, re.IGNORECASE) is not None
+        or "_ob_" in cat_lower
+        or cat_lower.endswith("_ob_term")
+    )
 
-    if ftype == "markdown":
+    if ftype == "markdown" and not is_ob_category:
+        # Generic club document
         flags["is_markdown_content"] = True
         role = "club-document"
         md_title, _para = first_markdown_heading(abs_path)
@@ -399,6 +512,22 @@ def classify_and_describe(
             )
         else:
             description = "Club information document (parsed from DOCX/PDF)."
+    elif ftype == "markdown" and is_ob_category:
+        # Office-bearer bio document (e.g. Singularity OBs)
+        flags["is_markdown_content"] = True
+        flags["is_ob_portrait"] = True
+        role = "office-bearer"
+        person, ob_role, marker = split_ob_filename(fname)
+        title = person or clean_token(fname)
+        bits = []
+        if person:
+            bits.append(person)
+        if ob_role:
+            bits.append(ob_role)
+        suffix = ", ".join(bits) if bits else clean_token(fname)
+        tenure_str = f" ({tenure})" if tenure else ""
+        new_str = " — new term" if marker == "new" else ""
+        description = f"Office-bearer profile {suffix}{tenure_str}{new_str}."
     elif ftype in {"document", "pdf", "spreadsheet"}:
         role = "source-document"
         description = f"Source document ({ftype}) — {clean_token(fname)}."
@@ -410,14 +539,6 @@ def classify_and_describe(
                 "Image extracted from a source document (DOCX/PDF), converted to WebP."
             )
         else:
-            is_ob_category = (
-                "OBs" in category
-                or "office" in cat_lower
-                or cat_lower.endswith("_obs")
-                or re.search(r"\d{2}-\d{2}_obs?$", category, re.IGNORECASE) is not None
-                or "_ob_" in cat_lower
-                or cat_lower.endswith("_ob_term")
-            )
             is_ob_filename = (
                 fname.startswith(("OB-", "nOB-"))
                 or re.search(
@@ -485,10 +606,27 @@ def classify_and_describe(
         "year": year,
         "person": person,
         "ob_role": ob_role,
-        "category_label": CATEGORY_LABEL.get(category, category.replace("_", " ")),
+        "category_label": _humanize_category(category),
         "title": title,
         "description": description,
     }
+
+
+def _humanize_category(category: str) -> str:
+    """Generate a clean human-readable category label.
+
+    Falls back to underscore→space replacement, with special handling for
+    `_images` subdirs (used by the DOCX/PDF parser to hold extracted images):
+    instead of "Foo images" we render "Images extracted from Foo".
+    """
+    if category in CATEGORY_LABEL:
+        return CATEGORY_LABEL[category]
+    if category.endswith("_images"):
+        base = category[: -len("_images")].replace("_", " ").strip()
+        if base:
+            return f"Images extracted from {base}"
+        return "Images extracted from source document"
+    return category.replace("_", " ")
 
 
 def build_tags(club: str, info: dict) -> list[str]:
@@ -586,7 +724,7 @@ def generate_assets_map(
                 "public_url": f"{site_base}/{ABSOLUTE_PATH_PREFIX}/{rel}",
                 "club": club,
                 "club_name": CLUB_NAMES.get(club, club),
-                "category": parts[1] if len(parts) > 2 else "(root)",
+                "category": parts[-2] if len(parts) > 2 else "(root)",
                 "category_label": info["category_label"],
                 "filename": fname,
                 "title": info["title"],
