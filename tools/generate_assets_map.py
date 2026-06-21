@@ -535,9 +535,16 @@ def classify_and_describe(
         if cat_lower.endswith("_images") or "_images" in cat_lower:
             flags["is_extracted_from_doc"] = True
             role = "extracted-image"
-            description = (
-                "Image extracted from a source document (DOCX/PDF), converted to WebP."
-            )
+            # If the extracted image looks like a logo (e.g. "Logo_light.webp"),
+            # also flag it as a logo so the website can use it as the club's
+            # brand mark. Without this, clubs whose only logo is embedded in
+            # a document never get a proper logo on the site.
+            if re.search(r"logo", fname_lower):
+                flags["is_logo"] = True
+                role = "logo"
+                description = f"Club logo / brand asset — {clean_token(fname)}."
+            else:
+                description = "Image extracted from a source document (DOCX/PDF), converted to WebP."
         else:
             is_ob_filename = (
                 fname.startswith(("OB-", "nOB-"))
